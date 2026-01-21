@@ -241,7 +241,7 @@ export const ModuleTable = ({ results }: { results: Module[] }) => {
               <HoverCard key={index}>
                 <HoverCardTrigger asChild>
                   <TableRow>
-                    <TableCell className="font-medium uppercase">
+                    <TableCell className="font-medium">
                       {module.package || "N/A"}
                     </TableCell>
                     <TableCell>
