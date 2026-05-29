@@ -1,5 +1,6 @@
 export const dynamic = 'force-dynamic';
 
+import { createHash, timingSafeEqual } from "crypto";
 import { NextResponse } from "next/server";
 import { prom } from "@/lib/prometheus";
 import { getMetricsDb } from "@/lib/metrics-db";
@@ -51,8 +52,25 @@ interface CaptureResult {
 
 const RATE_LIMIT_SECONDS = 60;
 type MetricsPool = NonNullable<ReturnType<typeof getMetricsDb>>;
+type PrometheusValue = [number | string, string] | { value: string | number } | string | number | null | undefined;
+type PrometheusLabels = Record<string, string | undefined>;
+type PrometheusMetric = PrometheusLabels & { labels?: PrometheusLabels };
+
+interface PrometheusSeriesItem {
+  metric?: PrometheusMetric;
+  value?: PrometheusValue;
+}
+
+interface PrometheusInstantResult {
+  result?: PrometheusSeriesItem[];
+}
 
 let didWarnMissingGpuMetricsTable = false;
+let didWarnMissingCaptureToken = false;
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
 
 function isMissingGpuMetricsTableError(error: unknown) {
   return typeof error === "object" && error !== null && "code" in error && error.code === "42P01";
@@ -81,31 +99,70 @@ async function gpuMetricsTableExists(pool: MetricsPool) {
   return result.rows[0]?.table_name === "job_gpu_metrics";
 }
 
-const queryDirectUtilValues = async (filter: string): Promise<{ utilValues: number[]; jobSet: Set<string>; totalGPUs: number; rawResult: any }> => {
-  const result = await prom!.instantQuery(`DCGM_FI_DEV_GPU_UTIL{${filter}}`);
+function tokenDigest(token: string) {
+  return createHash("sha256").update(token).digest();
+}
+
+function tokensMatch(actual: string, expected: string) {
+  return timingSafeEqual(tokenDigest(actual), tokenDigest(expected));
+}
+
+function getCaptureTokenFromRequest(req: Request) {
+  const authHeader = req.headers.get("authorization")?.trim();
+  if (authHeader?.toLowerCase().startsWith("bearer ")) {
+    return authHeader.slice(7).trim();
+  }
+
+  return req.headers.get("x-api-key")?.trim() || "";
+}
+
+function validateCaptureAuth(req: Request): NextResponse<CaptureResult> | null {
+  const expectedToken = process.env.GPU_METRICS_CAPTURE_TOKEN?.trim();
+
+  if (!expectedToken) {
+    if (!didWarnMissingCaptureToken) {
+      console.warn("GPU metrics capture is not protected. Set GPU_METRICS_CAPTURE_TOKEN to require a secret for POST /api/gpu.");
+      didWarnMissingCaptureToken = true;
+    }
+    return null;
+  }
+
+  const providedToken = getCaptureTokenFromRequest(req);
+
+  if (!providedToken || !tokensMatch(providedToken, expectedToken)) {
+    return NextResponse.json(
+      {
+        status: 401,
+        message: "Unauthorized",
+      },
+      { status: 401 }
+    );
+  }
+
+  return null;
+}
+
+const queryDirectUtilValues = async (filter: string): Promise<number[]> => {
+  const result = await prom!.instantQuery(`DCGM_FI_DEV_GPU_UTIL{${filter}}`) as PrometheusInstantResult;
   const utilValues: number[] = [];
-  const jobSet = new Set<string>();
-  let totalGPUs = 0;
 
   if (result?.result && Array.isArray(result.result)) {
     for (const item of result.result) {
       const labels = item.metric?.labels || item.metric || {};
       const jobId = labels.hpc_job;
       if (jobId && jobId !== "0" && jobId !== "") {
-        jobSet.add(jobId);
-        totalGPUs++;
         const val = extractNumericValue(item.value);
         if (!isNaN(val)) utilValues.push(val);
       }
     }
   }
 
-  return { utilValues, jobSet, totalGPUs, rawResult: result };
+  return utilValues;
 };
 
 const queryDirectMemory = async (filter: string): Promise<number> => {
-  const memUsedResult = await prom!.instantQuery(`DCGM_FI_DEV_FB_USED{${filter}}`);
-  const memFreeResult = await prom!.instantQuery(`DCGM_FI_DEV_FB_FREE{${filter}}`);
+  const memUsedResult = await prom!.instantQuery(`DCGM_FI_DEV_FB_USED{${filter}}`) as PrometheusInstantResult;
+  const memFreeResult = await prom!.instantQuery(`DCGM_FI_DEV_FB_FREE{${filter}}`) as PrometheusInstantResult;
 
   if (!memUsedResult?.result || !memFreeResult?.result) return 0;
 
@@ -175,7 +232,7 @@ async function queryJobWithRecordingRules(jobId: string): Promise<GPUJobData> {
 }
 
 async function queryJobDirect(jobId: string): Promise<GPUJobData | null> {
-  const { utilValues } = await queryDirectUtilValues(`hpc_job="${jobId}"`);
+  const utilValues = await queryDirectUtilValues(`hpc_job="${jobId}"`);
   if (utilValues.length === 0) return null;
 
   const avgUtilization = utilValues.reduce((a, b) => a + b, 0) / utilValues.length;
@@ -247,7 +304,7 @@ async function handleOverview(from?: string, to?: string): Promise<NextResponse>
     }
 
     const conditions: string[] = [];
-    const params: any[] = [];
+    const params: Array<Date | string> = [];
     let paramIndex = 1;
 
     if (from) {
@@ -307,7 +364,11 @@ async function handleOverview(from?: string, to?: string): Promise<NextResponse>
 
 // ─── POST: Capture GPU Metrics ───────────────────────────────────────────────
 
-const extractCaptureJobMetrics = (utilResult: any, memUsedResult: any, memFreeResult: any): Map<string, GPUJobMetric> => {
+const extractCaptureJobMetrics = (
+  utilResult: PrometheusInstantResult | null,
+  memUsedResult: PrometheusInstantResult | null,
+  memFreeResult: PrometheusInstantResult | null
+): Map<string, GPUJobMetric> => {
   const jobMetrics = new Map<string, GPUJobMetric>();
 
   if (!utilResult?.result || !Array.isArray(utilResult.result)) {
@@ -435,18 +496,18 @@ async function handleCapture(): Promise<NextResponse<CaptureResult>> {
 
   try {
     const [utilResult, memUsedResult, memFreeResult] = await Promise.all([
-      prom.instantQuery('DCGM_FI_DEV_GPU_UTIL{hpc_job!="0", hpc_job!=""}').catch((e) => {
-        errors.push(`Utilization query failed: ${e.message}`);
+      prom.instantQuery('DCGM_FI_DEV_GPU_UTIL{hpc_job!="0", hpc_job!=""}').catch((e: unknown) => {
+        errors.push(`Utilization query failed: ${getErrorMessage(e)}`);
         return null;
-      }),
-      prom.instantQuery('DCGM_FI_DEV_FB_USED{hpc_job!="0", hpc_job!=""}').catch((e) => {
-        errors.push(`Memory used query failed: ${e.message}`);
+      }) as Promise<PrometheusInstantResult | null>,
+      prom.instantQuery('DCGM_FI_DEV_FB_USED{hpc_job!="0", hpc_job!=""}').catch((e: unknown) => {
+        errors.push(`Memory used query failed: ${getErrorMessage(e)}`);
         return null;
-      }),
-      prom.instantQuery('DCGM_FI_DEV_FB_FREE{hpc_job!="0", hpc_job!=""}').catch((e) => {
-        errors.push(`Memory free query failed: ${e.message}`);
+      }) as Promise<PrometheusInstantResult | null>,
+      prom.instantQuery('DCGM_FI_DEV_FB_FREE{hpc_job!="0", hpc_job!=""}').catch((e: unknown) => {
+        errors.push(`Memory free query failed: ${getErrorMessage(e)}`);
         return null;
-      }),
+      }) as Promise<PrometheusInstantResult | null>,
     ]);
 
     if (!utilResult) {
@@ -499,8 +560,8 @@ async function handleCapture(): Promise<NextResponse<CaptureResult>> {
         } else {
           updated++;
         }
-      } catch (err: any) {
-        errors.push(`Failed to upsert job ${jobId}: ${err.message}`);
+      } catch (err: unknown) {
+        errors.push(`Failed to upsert job ${jobId}: ${getErrorMessage(err)}`);
       }
     }
 
@@ -515,8 +576,8 @@ async function handleCapture(): Promise<NextResponse<CaptureResult>> {
         [Array.from(currentJobIds)]
       );
       markedComplete = completeResult.rowCount || 0;
-    } catch (err: any) {
-      errors.push(`Failed to mark complete jobs: ${err.message}`);
+    } catch (err: unknown) {
+      errors.push(`Failed to mark complete jobs: ${getErrorMessage(err)}`);
     }
 
     return NextResponse.json({
@@ -527,12 +588,12 @@ async function handleCapture(): Promise<NextResponse<CaptureResult>> {
       markedComplete,
       errors: errors.length > 0 ? errors : undefined,
     });
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("GPU metrics capture error:", error);
     return NextResponse.json({
       status: 500,
       message: "Error capturing GPU metrics",
-      errors: [...errors, error.message],
+      errors: [...errors, getErrorMessage(error)],
     });
   }
 }
@@ -569,6 +630,9 @@ export async function GET(req: Request) {
   }
 }
 
-export async function POST(): Promise<NextResponse<CaptureResult>> {
+export async function POST(req: Request): Promise<NextResponse<CaptureResult>> {
+  const authError = validateCaptureAuth(req);
+  if (authError) return authError;
+
   return handleCapture();
 }
