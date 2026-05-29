@@ -2,7 +2,18 @@ export const dynamic = 'force-dynamic';
 
 import { NextResponse } from "next/server";
 import { prom } from "@/lib/prometheus";
-import { extractNumericValue } from "@/lib/gpu-metrics";
+import { buildGpuMetricsFilter, extractNumericValue, promSelector } from "@/lib/gpu-metrics";
+import type { PrometheusSampleValue } from "@/lib/gpu-metrics";
+
+const escapePromString = (value: string) =>
+  value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+
+interface NodeGpuSeries {
+  value?: PrometheusSampleValue;
+  metric?: {
+    labels?: Record<string, string | undefined>;
+  };
+}
 
 export async function GET(req: Request) {
   const node = new URL(req.url).searchParams.get("name");
@@ -22,7 +33,8 @@ export async function GET(req: Request) {
   }
 
   try {
-    const prometheusQuery = `avg_over_time(DCGM_FI_DEV_GPU_UTIL{Hostname="${node}"}[5m])`;
+    const filter = buildGpuMetricsFilter([`Hostname="${escapePromString(node)}"`]);
+    const prometheusQuery = `avg_over_time(${promSelector("DCGM_FI_DEV_GPU_UTIL", filter)}[5m])`;
     const gpuRes = await prom.instantQuery(prometheusQuery);
 
     if (!gpuRes.result || gpuRes.result.length === 0) {
@@ -33,7 +45,7 @@ export async function GET(req: Request) {
       });
     }
 
-    const gpuData = gpuRes.result.map((series: any) => {
+    const gpuData = (gpuRes.result as NodeGpuSeries[]).map((series) => {
       const value = extractNumericValue(series.value);
 
       return {
