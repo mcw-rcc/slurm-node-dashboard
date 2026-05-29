@@ -3,7 +3,14 @@ export const dynamic = 'force-dynamic';
 import { NextResponse } from "next/server";
 import { prom } from "@/lib/prometheus";
 import { fetchSlurmData } from "@/lib/slurm-api";
-import { extractValue, extractSeries, extractNumericValue, checkRecordingRulesAvailable } from "@/lib/gpu-metrics";
+import {
+  buildGpuMetricsFilter,
+  extractSeries,
+  extractValue,
+  checkRecordingRulesAvailable,
+  promSelector,
+} from "@/lib/gpu-metrics";
+import type { PrometheusSeries } from "@/lib/gpu-metrics";
 
 // ─── Slurm Integration ──────────────────────────────────────────────────────
 
@@ -11,6 +18,37 @@ interface SlurmJobInfo {
   userName: string;
   account: string;
 }
+
+interface SlurmApiJob {
+  job_state?: string | string[];
+  job_id?: string | number;
+  user_name?: string;
+  user?: string;
+  account?: string;
+}
+
+interface GpuReportJob {
+  jobId: string;
+  userName: string;
+  account: string;
+  avgUtilization: number;
+  gpuCount: number;
+  isUnderutilized: boolean;
+  nodeNames: string[];
+  gpuModel: string;
+}
+
+type RecordingRuleValue = number | PrometheusSeries[] | null;
+type RecordingRuleResults = Record<string, RecordingRuleValue>;
+
+const jobFilter = (jobId: string) => buildGpuMetricsFilter([`hpc_job="${jobId}"`]);
+const activeGpuFilter = () => buildGpuMetricsFilter(['hpc_job!="0"', 'hpc_job!=""']);
+
+const asSeries = (value: RecordingRuleValue): PrometheusSeries[] =>
+  Array.isArray(value) ? value : [];
+
+const asNumber = (value: RecordingRuleValue): number =>
+  typeof value === "number" ? value : 0;
 
 const getRunningJobsFromSlurm = async (): Promise<{ jobIds: Set<string>; jobInfo: Map<string, SlurmJobInfo> }> => {
   try {
@@ -24,7 +62,7 @@ const getRunningJobsFromSlurm = async (): Promise<{ jobIds: Set<string>; jobInfo
     const jobIds = new Set<string>();
     const jobInfo = new Map<string, SlurmJobInfo>();
 
-    data.jobs.forEach((job: any) => {
+    (data.jobs as SlurmApiJob[]).forEach((job) => {
       const state = Array.isArray(job.job_state) ? job.job_state[0] : job.job_state;
       if (state?.toUpperCase() === "RUNNING" && job.job_id) {
         const jobIdStr = job.job_id.toString();
@@ -50,7 +88,7 @@ const checkJobFreshness = async (jobId: string): Promise<boolean> => {
 
   try {
     const freshnessWindow = 120;
-    const query = `last_over_time(DCGM_FI_DEV_GPU_UTIL{hpc_job="${jobId}"}[${freshnessWindow}s])`;
+    const query = `last_over_time(${promSelector("DCGM_FI_DEV_GPU_UTIL", jobFilter(jobId))}[${freshnessWindow}s])`;
     const result = await prom.instantQuery(query);
     return result && result.result && result.result.length > 0;
   } catch (error) {
@@ -64,30 +102,32 @@ const checkJobFreshness = async (jobId: string): Promise<boolean> => {
 const queryWithRecordingRules = async (timeRange: string, jobId?: string) => {
   if (!prom) throw new Error("Prometheus not configured");
 
-  const systemQueries = {
-    avgUtilization: "system:gpu_utilization:avg",
-    underutilizedCount: "system:underutilized_jobs:count",
-    wastedGpuHours: "system:wasted_gpu_hours:total",
+  const systemFilter = buildGpuMetricsFilter();
+  const systemQueries: Record<string, string> = {
+    avgUtilization: promSelector("cluster:gpu_utilization:current_avg", systemFilter),
+    underutilizedCount: promSelector("cluster:underutilized_jobs:count", systemFilter),
+    totalGpuCount: promSelector("cluster:gpu_count:total", systemFilter),
   };
 
-  const jobQueries = jobId
+  const scopedJobFilter = jobId ? jobFilter(jobId) : systemFilter;
+  const jobQueries: Record<string, string> = jobId
     ? {
-        utilization: `job:gpu_utilization:${timeRange}_avg{hpc_job="${jobId}"}`,
-        currentUtil: `job:gpu_utilization:current_avg{hpc_job="${jobId}"}`,
-        gpuCount: `job:gpu_count:current{hpc_job="${jobId}"}`,
-        duration: `job:duration_seconds:current{hpc_job="${jobId}"}`,
-        isUnderutilized: `job:is_underutilized:4h{hpc_job="${jobId}"}`,
+        utilization: promSelector(`job:gpu_utilization:${timeRange}_avg`, scopedJobFilter),
+        currentUtil: promSelector("job:gpu_utilization:current_avg", scopedJobFilter),
+        gpuCount: promSelector("job:gpu_count:current", scopedJobFilter),
+        duration: promSelector("job:duration_seconds:current", scopedJobFilter),
+        isUnderutilized: promSelector("job:gpu_underutilized:bool", scopedJobFilter),
       }
     : {
-        allJobs: `job:gpu_utilization:${timeRange}_avg`,
-        currentJobs: `job:gpu_utilization:current_avg`,
-        underutilizedJobs: `system:underutilized_jobs:${timeRange}`,
+        allJobs: promSelector(`job:gpu_utilization:${timeRange}_avg`, scopedJobFilter),
+        currentJobs: promSelector("job:gpu_utilization:current_avg", scopedJobFilter),
+        underutilizedJobs: promSelector("job:gpu_underutilized:bool", scopedJobFilter),
       };
 
-  const allQueries = { ...systemQueries, ...(jobQueries as any) };
+  const allQueries: Record<string, string> = { ...systemQueries, ...jobQueries };
 
-  const results: Record<string, any> = {};
-  const promises = Object.entries(allQueries).map(async ([key, query]: any) => {
+  const results: RecordingRuleResults = {};
+  const promises = Object.entries(allQueries).map(async ([key, query]) => {
     try {
       const result = await prom!.instantQuery(query);
 
@@ -114,8 +154,8 @@ const queryWithDirectMetrics = async (timeRange: string, jobId?: string) => {
   const { jobIds: runningJobs, jobInfo: slurmJobInfo } = await getRunningJobsFromSlurm();
 
   const baseQuery = jobId
-    ? `DCGM_FI_DEV_GPU_UTIL{hpc_job="${jobId}"}`
-    : 'DCGM_FI_DEV_GPU_UTIL{hpc_job!="0", hpc_job!=""}';
+    ? promSelector("DCGM_FI_DEV_GPU_UTIL", jobFilter(jobId))
+    : promSelector("DCGM_FI_DEV_GPU_UTIL", activeGpuFilter());
 
   const utilResult = await prom.instantQuery(baseQuery);
   const gpuSeries = extractSeries(utilResult);
@@ -146,7 +186,7 @@ const queryWithDirectMetrics = async (timeRange: string, jobId?: string) => {
   }
 
   // Process results
-  const jobMap = new Map();
+  const jobMap = new Map<string, GpuReportJob>();
   let totalUtilization = 0;
   let validResults = 0;
   const useAllJobs = freshJobs.size === 0 && runningJobs.size === 0;
@@ -176,6 +216,7 @@ const queryWithDirectMetrics = async (timeRange: string, jobId?: string) => {
         });
       } else {
         const job = jobMap.get(gpu.jobId);
+        if (!job) continue;
         const oldTotal = job.avgUtilization * job.gpuCount;
         job.gpuCount += 1;
         job.avgUtilization = (oldTotal + utilValue) / job.gpuCount;
@@ -198,7 +239,7 @@ const queryWithDirectMetrics = async (timeRange: string, jobId?: string) => {
   if (jobId) {
     for (const job of jobs) {
       try {
-        const durationQuery = `(time() - min_over_time(timestamp(DCGM_FI_DEV_GPU_UTIL{hpc_job="${job.jobId}"})[${timeRange}:]))/3600`;
+        const durationQuery = `(time() - min_over_time(timestamp(${promSelector("DCGM_FI_DEV_GPU_UTIL", jobFilter(job.jobId))})[${timeRange}:]))/3600`;
         const durationResult = await prom.instantQuery(durationQuery);
         const duration = extractValue(durationResult) || 24;
         const wastedFraction = (100 - job.avgUtilization) / 100;
@@ -231,7 +272,7 @@ export async function GET(req: Request) {
   }
 
   try {
-    const recordingRulesAvailable = await checkRecordingRulesAvailable();
+    const recordingRulesAvailable = await checkRecordingRulesAvailable(undefined, buildGpuMetricsFilter());
 
     if (recordingRulesAvailable) {
       const ruleResults = await queryWithRecordingRules(timeRange, jobId);
@@ -246,32 +287,32 @@ export async function GET(req: Request) {
           status: 200,
           data: {
             jobId,
-            averageUtilization: ruleResults.utilization || ruleResults.currentUtil || 0,
-            gpuCount: ruleResults.gpuCount || 1,
-            duration: ruleResults.duration ? ruleResults.duration / 3600 : 0,
-            wastedGpuHours: ruleResults.wastedGpuHours || 0,
-            isUnderutilized: ruleResults.isUnderutilized === 1,
+            averageUtilization: asNumber(ruleResults.utilization) || asNumber(ruleResults.currentUtil),
+            gpuCount: asNumber(ruleResults.gpuCount) || 1,
+            duration: asNumber(ruleResults.duration) ? asNumber(ruleResults.duration) / 3600 : 0,
+            wastedGpuHours: asNumber(ruleResults.wastedGpuHours),
+            isUnderutilized: asNumber(ruleResults.isUnderutilized) === 1,
           },
         });
       } else {
-        const allJobs = ruleResults.allJobs || ruleResults.currentJobs || [];
-        const underutilizedJobIds = new Set();
+        const allJobs = asSeries(ruleResults.allJobs).length > 0
+          ? asSeries(ruleResults.allJobs)
+          : asSeries(ruleResults.currentJobs);
+        const underutilizedJobIds = new Set<string>();
 
-        if (ruleResults.underutilizedJobs && Array.isArray(ruleResults.underutilizedJobs)) {
-          ruleResults.underutilizedJobs.forEach((job: any) => {
-            if (job.jobId && job.jobId !== "unknown") underutilizedJobIds.add(job.jobId);
-          });
-        }
+        asSeries(ruleResults.underutilizedJobs).forEach((job) => {
+          if (job.jobId && job.jobId !== "unknown") underutilizedJobIds.add(job.jobId);
+        });
 
         const useAllJobs = runningJobs.size === 0;
 
         const jobs = allJobs
-          .filter((job: any) => {
+          .filter((job) => {
             const isValidJob = job.jobId && job.jobId !== "unknown" && job.jobId !== "0";
             const isRunningInSlurm = runningJobs.has(job.jobId);
             return isValidJob && (isRunningInSlurm || useAllJobs);
           })
-          .map((job: any) => {
+          .map((job) => {
             const userInfo = slurmJobInfo.get(job.jobId);
             return {
               jobId: job.jobId,
@@ -283,7 +324,7 @@ export async function GET(req: Request) {
           });
 
         let totalUtilization = 0;
-        jobs.forEach((job: any) => { totalUtilization += job.avgUtilization; });
+        jobs.forEach((job) => { totalUtilization += job.avgUtilization; });
         const avgUtilization = jobs.length > 0 ? totalUtilization / jobs.length : 0;
 
         return NextResponse.json({
@@ -291,8 +332,8 @@ export async function GET(req: Request) {
           data: {
             systemMetrics: {
               averageUtilization: avgUtilization,
-              underutilizedJobCount: jobs.filter((job: any) => job.isUnderutilized).length,
-              totalWastedGpuHours: ruleResults.wastedGpuHours || 0,
+              underutilizedJobCount: jobs.filter((job) => job.isUnderutilized).length,
+              totalWastedGpuHours: asNumber(ruleResults.wastedGpuHours),
               totalJobs: jobs.length,
             },
             jobs,
@@ -303,7 +344,7 @@ export async function GET(req: Request) {
       const directResults = await queryWithDirectMetrics(timeRange, jobId);
 
       if (jobId) {
-        const job = directResults.jobs.find((j: any) => j.jobId === jobId);
+        const job = directResults.jobs.find((j) => j.jobId === jobId);
 
         if (!job) {
           return NextResponse.json({ status: 404, message: `Job ${jobId} not found or not currently running` });
@@ -330,7 +371,7 @@ export async function GET(req: Request) {
               totalWastedGpuHours: Math.round(directResults.wastedGpuHours),
               totalJobs: directResults.jobs.length,
             },
-            jobs: directResults.jobs.map((job: any) => ({
+            jobs: directResults.jobs.map((job) => ({
               jobId: job.jobId,
               userName: job.userName,
               account: job.account,
