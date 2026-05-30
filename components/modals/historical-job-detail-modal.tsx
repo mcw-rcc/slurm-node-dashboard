@@ -185,7 +185,9 @@ const HistoricalJobDetailModal: React.FC<HistoricalJobDetailModalProps> = ({
   
   // Check if GPU data is available (for historical jobs, need metrics plugin too)
   const gpuDataURL = useMemo(() => 
-    gpuUtilizationPluginMetadata.isEnabled ? `/api/gpu?job_id=${searchID}` : null,
+    gpuUtilizationPluginMetadata.isEnabled
+      ? `/api/gpu?job_id=${encodeURIComponent(searchID)}&source=database`
+      : null,
     [searchID]
   );
   
@@ -295,7 +297,7 @@ const HistoricalJobDetailModal: React.FC<HistoricalJobDetailModalProps> = ({
             <div className={`grid gap-3 ${gridCols}`}>
               <EfficiencyBadge value={cpuEfficiency} label="CPU Efficiency" />
               <EfficiencyBadge value={memEfficiency} label="Memory Efficiency" />
-              {showGpu && <GPUUtilizationBadge jobId={searchID} />}
+              {showGpu && <GPUUtilizationBadge jobId={searchID} source="database" />}
             </div>
           );
         })()}

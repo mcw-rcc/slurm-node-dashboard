@@ -27,6 +27,8 @@ interface GPUJobData {
   isComplete?: boolean;
 }
 
+type GPUJobSourceMode = "auto" | "database";
+
 interface GPUOverviewData {
   avgUtilization: number;
   memoryUtilization: number;
@@ -346,7 +348,19 @@ const queryDirectMemory = async (filter: string): Promise<number> => {
 
 // ─── GET: Per-Job or Overview ────────────────────────────────────────────────
 
-async function handleJobQuery(jobId: string): Promise<NextResponse> {
+async function handleJobQuery(jobId: string, sourceMode: GPUJobSourceMode = "auto"): Promise<NextResponse> {
+  if (sourceMode === "database") {
+    const dbData = await queryJobFromDatabase(jobId);
+    if (dbData) {
+      return NextResponse.json({ status: 200, data: dbData });
+    }
+
+    return NextResponse.json({
+      status: 404,
+      message: `No historical GPU metrics found for job ${jobId}`,
+    });
+  }
+
   const jobFilter = buildGpuMetricsFilter([`hpc_job="${jobId}"`]);
 
   // Strategy: recording rules → direct DCGM → database fallback
@@ -903,12 +917,14 @@ async function handleCapture({ dryRun = false }: { dryRun?: boolean } = {}): Pro
 export async function GET(req: Request) {
   const url = new URL(req.url);
   const jobId = url.searchParams.get("job_id");
+  const requestedSource = url.searchParams.get("source") || url.searchParams.get("prefer");
+  const sourceMode: GPUJobSourceMode = requestedSource === "database" ? "database" : "auto";
   const from = url.searchParams.get("from") || undefined;
   const to = url.searchParams.get("to") || undefined;
 
   try {
     if (jobId) {
-      return await handleJobQuery(jobId);
+      return await handleJobQuery(jobId, sourceMode);
     }
     return await handleOverview(from, to);
   } catch (error) {
