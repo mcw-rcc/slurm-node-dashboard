@@ -21,8 +21,21 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { HistoricalJobDetailModalProps, HistoricalJob } from "@/types/types";
 import { CopyButton } from "@/components/llm/llm-shared-utils";
-import { GPUEfficiencyBadge } from "@/components/job-gpu-stats";
+import { GPUUtilizationBadge } from "@/components/job-gpu-stats";
 import { gpuUtilizationPluginMetadata } from "@/actions/plugins";
+
+type TresUsageMetric = {
+  type?: string;
+  count?: number;
+};
+
+type StepExitCode = {
+  exit_code?: {
+    return_code?: {
+      number?: number;
+    };
+  };
+};
 
 // Rubric for efficiency grading
 const rubric: { [key: string]: { threshold: number; color: string } } = {
@@ -73,9 +86,21 @@ const formatMiB = (mib: number): string => {
   return `${(mib / 1024).toFixed(2)} GiB`;
 };
 
+const getMaxMemoryBytes = (metrics: unknown): number => {
+  if (!Array.isArray(metrics)) return 0;
+
+  return metrics.reduce((max, metric) => {
+    const tresMetric = metric as TresUsageMetric;
+    if (tresMetric.type !== "mem") return max;
+    return typeof tresMetric.count === "number" && tresMetric.count > max
+      ? tresMetric.count
+      : max;
+  }, 0);
+};
+
 const calculateMemEfficiency = (job: HistoricalJob): number => {
   const maxUsedMem_Bytes = job.steps.reduce((max, step) => {
-    const maxRAM = step.tres.requested.max.find((t: any) => t.type === "mem")?.count || 0;
+    const maxRAM = getMaxMemoryBytes(step.tres.requested.max);
     return maxRAM > max ? maxRAM : max;
   }, 0);
   const allocMem_MiB = job.tres.requested.find((t) => t.type === "mem")?.count || 0;
@@ -164,7 +189,7 @@ const HistoricalJobDetailModal: React.FC<HistoricalJobDetailModalProps> = ({
     [searchID]
   );
   
-  const { data: gpuData, isLoading: gpuDataLoading } = useSWR<{ status: number; data?: any }>(
+  const { data: gpuData, isLoading: gpuDataLoading } = useSWR<{ status: number; data?: unknown }>(
     open && gpuDataURL ? gpuDataURL : null,
     jsonFetcher,
     { revalidateOnFocus: false }
@@ -270,7 +295,7 @@ const HistoricalJobDetailModal: React.FC<HistoricalJobDetailModalProps> = ({
             <div className={`grid gap-3 ${gridCols}`}>
               <EfficiencyBadge value={cpuEfficiency} label="CPU Efficiency" />
               <EfficiencyBadge value={memEfficiency} label="Memory Efficiency" />
-              {showGpu && <GPUEfficiencyBadge jobId={searchID} />}
+              {showGpu && <GPUUtilizationBadge jobId={searchID} />}
             </div>
           );
         })()}
@@ -390,7 +415,8 @@ const HistoricalJobDetailModal: React.FC<HistoricalJobDetailModalProps> = ({
             <div className="space-y-1">
               {job.steps.map((step, index) => {
                 const isExpanded = expandedSteps.has(index);
-                const stepMemUsed = step.tres.requested.max.find((t: any) => t.type === "mem")?.count || 0;
+                const stepMemUsed = getMaxMemoryBytes(step.tres.requested.max);
+                const stepExitCode = (step as StepExitCode).exit_code?.return_code?.number;
                 
                 return (
                   <div key={index} className="rounded-lg border bg-muted/20 overflow-hidden">
@@ -428,7 +454,7 @@ const HistoricalJobDetailModal: React.FC<HistoricalJobDetailModalProps> = ({
                         </div>
                         <div>
                           <span className="text-muted-foreground">Exit Code:</span>{" "}
-                          <span className="font-mono">{(step as any).exit_code?.return_code?.number ?? "N/A"}</span>
+                          <span className="font-mono">{stepExitCode ?? "N/A"}</span>
                         </div>
                       </div>
                     )}
