@@ -69,8 +69,9 @@ interface JobGPUStatsProps {
 }
 
 export function JobGPUStats({ jobId, variant = "compact" }: JobGPUStatsProps) {
+  const gpuUrl = `/api/gpu?job_id=${encodeURIComponent(jobId)}`;
   const { data, isLoading } = useSWR<GPUJobResponse>(
-    gpuUtilizationPluginMetadata.isEnabled ? `/api/gpu?job_id=${jobId}` : null,
+    gpuUtilizationPluginMetadata.isEnabled ? gpuUrl : null,
     fetcher,
     { 
       refreshInterval: (latestData) => {
@@ -214,11 +215,14 @@ export function JobGPUStats({ jobId, variant = "compact" }: JobGPUStatsProps) {
 
 interface GPUUtilizationBadgeProps {
   jobId: string;
+  source?: "auto" | "database";
 }
 
-export function GPUUtilizationBadge({ jobId }: GPUUtilizationBadgeProps) {
+export function GPUUtilizationBadge({ jobId, source = "auto" }: GPUUtilizationBadgeProps) {
+  const sourceQuery = source === "database" ? "&source=database" : "";
+  const gpuUrl = `/api/gpu?job_id=${encodeURIComponent(jobId)}${sourceQuery}`;
   const { data, isLoading } = useSWR<GPUJobResponse>(
-    gpuUtilizationPluginMetadata.isEnabled ? `/api/gpu?job_id=${jobId}` : null,
+    gpuUtilizationPluginMetadata.isEnabled ? gpuUrl : null,
     fetcher,
     { revalidateOnFocus: false }
   );
@@ -249,7 +253,6 @@ export function GPUUtilizationBadge({ jobId }: GPUUtilizationBadgeProps) {
     <div className="p-3 rounded-md border bg-muted/30">
       <div className="flex items-center justify-between mb-1">
         <span className="text-xs text-muted-foreground flex items-center gap-1.5">
-          <Gauge className="h-3.5 w-3.5 text-muted-foreground" />
           GPU Utilization
         </span>
         <span className={`text-sm font-semibold ${gradeInfo.color}`}>
