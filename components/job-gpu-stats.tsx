@@ -23,6 +23,46 @@ interface GPUJobResponse {
 
 const fetcher = (url: string) => fetch(url).then((res) => res.json());
 
+const gpuRubric: Record<string, { threshold: number; color: string; barClass: string; label: string }> = {
+  A: {
+    threshold: 85,
+    color: "text-emerald-600 dark:text-emerald-400",
+    barClass: "bg-emerald-500",
+    label: "Excellent",
+  },
+  B: {
+    threshold: 70,
+    color: "text-sky-600 dark:text-sky-400",
+    barClass: "bg-sky-500",
+    label: "Strong",
+  },
+  C: {
+    threshold: 50,
+    color: "text-foreground",
+    barClass: "bg-primary/75",
+    label: "Healthy",
+  },
+  D: {
+    threshold: 30,
+    color: "text-amber-600 dark:text-amber-400",
+    barClass: "bg-amber-500",
+    label: "Low",
+  },
+  E: {
+    threshold: 0,
+    color: "text-red-600 dark:text-red-400",
+    barClass: "bg-red-500",
+    label: "Underutilized",
+  },
+};
+
+const getGpuUtilizationGrade = (score: number): keyof typeof gpuRubric => {
+  for (const [key, subobj] of Object.entries(gpuRubric)) {
+    if (score >= subobj.threshold) return key as keyof typeof gpuRubric;
+  }
+  return "E";
+};
+
 interface JobGPUStatsProps {
   jobId: string;
   variant?: "compact" | "full" | "badge";
@@ -64,7 +104,6 @@ export function JobGPUStats({ jobId, variant = "compact" }: JobGPUStatsProps) {
   const stats = data.data;
   const isLow = stats.avgUtilization < 30;
   const isHigh = stats.avgUtilization >= 70;
-  const isMedium = !isLow && !isHigh;
 
   if (variant === "badge") {
     return (
@@ -108,11 +147,20 @@ export function JobGPUStats({ jobId, variant = "compact" }: JobGPUStatsProps) {
 
   return (
     <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+          <Gauge className="h-3.5 w-3.5" />
+          GPU Metrics
+        </span>
+        <span className="text-xs text-muted-foreground">
+          {isHistorical ? "Historical average" : "Live average"}
+        </span>
+      </div>
       <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
         <div className="p-4 rounded-xl border bg-card transition-colors hover:bg-muted/30">
           <div className="mb-2">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              Avg Utilization
+              Avg GPU Utilization
             </span>
           </div>
           <div className="flex items-baseline gap-1">
@@ -126,7 +174,7 @@ export function JobGPUStats({ jobId, variant = "compact" }: JobGPUStatsProps) {
         <div className="p-4 rounded-xl border bg-card transition-colors hover:bg-muted/30">
           <div className="mb-2">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              Memory
+              GPU Memory Used
             </span>
           </div>
           <div className="flex items-baseline gap-1">
@@ -140,7 +188,7 @@ export function JobGPUStats({ jobId, variant = "compact" }: JobGPUStatsProps) {
         <div className="p-4 rounded-xl border bg-card transition-colors hover:bg-muted/30">
           <div className="mb-2">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
-              GPU Count
+              Allocated GPUs
             </span>
           </div>
           <div className="flex items-baseline gap-1">
@@ -164,26 +212,11 @@ export function JobGPUStats({ jobId, variant = "compact" }: JobGPUStatsProps) {
   );
 }
 
-interface GPUEfficiencyBadgeProps {
+interface GPUUtilizationBadgeProps {
   jobId: string;
 }
 
-const rubric: { [key: string]: { threshold: number; color: string; barClass: string } } = {
-  A: { threshold: 90, color: "text-foreground", barClass: "bg-primary" },
-  B: { threshold: 80, color: "text-foreground", barClass: "bg-primary/80" },
-  C: { threshold: 70, color: "text-muted-foreground", barClass: "bg-muted-foreground/70" },
-  D: { threshold: 60, color: "text-muted-foreground", barClass: "bg-muted-foreground/50" },
-  E: { threshold: 0, color: "text-muted-foreground", barClass: "bg-muted-foreground/40" },
-};
-
-const getLetterGrade = (score: number): keyof typeof rubric => {
-  for (const [key, subobj] of Object.entries(rubric)) {
-    if (score >= subobj.threshold) return key as keyof typeof rubric;
-  }
-  return "E";
-};
-
-export function GPUEfficiencyBadge({ jobId }: GPUEfficiencyBadgeProps) {
+export function GPUUtilizationBadge({ jobId }: GPUUtilizationBadgeProps) {
   const { data, isLoading } = useSWR<GPUJobResponse>(
     gpuUtilizationPluginMetadata.isEnabled ? `/api/gpu?job_id=${jobId}` : null,
     fetcher,
@@ -194,7 +227,7 @@ export function GPUEfficiencyBadge({ jobId }: GPUEfficiencyBadgeProps) {
 
   if (isLoading) {
     return (
-      <div className="p-4 rounded-xl border bg-card">
+      <div className="p-3 rounded-md border bg-muted/30">
         <Skeleton className="h-3 w-24 mb-3" />
         <Skeleton className="h-6 w-16" />
       </div>
@@ -206,31 +239,38 @@ export function GPUEfficiencyBadge({ jobId }: GPUEfficiencyBadgeProps) {
   }
 
   const value = data.data.avgUtilization;
-  const grade = getLetterGrade(value);
-  const gradeInfo = rubric[grade];
+  const grade = getGpuUtilizationGrade(value);
+  const gradeInfo = gpuRubric[grade];
+  const sourceLabel = data.data.source === "database" || data.data.isComplete
+    ? "Historical average"
+    : "Live average";
 
   return (
-    <div className="p-4 rounded-xl border border-border bg-card transition-colors hover:bg-muted/30">
-      <div className="flex items-center justify-between mb-2">
-        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+    <div className="p-3 rounded-md border bg-muted/30">
+      <div className="flex items-center justify-between mb-1">
+        <span className="text-xs text-muted-foreground flex items-center gap-1.5">
           <Gauge className="h-3.5 w-3.5 text-muted-foreground" />
-          Efficiency
+          GPU Utilization
         </span>
-        <span className={`text-2xl font-bold ${gradeInfo.color}`}>
+        <span className={`text-sm font-semibold ${gradeInfo.color}`}>
           {grade}
         </span>
       </div>
       <div className="flex items-baseline gap-1">
-        <span className={`text-xl font-bold tabular-nums ${gradeInfo.color}`}>
+        <span className="text-base font-medium tabular-nums">
           {value.toFixed(1)}
         </span>
-        <span className="text-sm text-muted-foreground">%</span>
+        <span className="text-xs text-muted-foreground">%</span>
       </div>
-      <div className="mt-3 h-1.5 bg-muted rounded-full overflow-hidden">
+      <div className="mt-2 h-1.5 bg-muted rounded-full overflow-hidden">
         <div
           className={`h-full rounded-full transition-all duration-500 ${gradeInfo.barClass}`}
           style={{ width: `${Math.min(value, 100)}%` }}
         />
+      </div>
+      <div className="mt-1.5 flex items-center justify-between gap-2 text-[10px] text-muted-foreground">
+        <span>{sourceLabel}</span>
+        <span className={gradeInfo.color}>{gradeInfo.label}</span>
       </div>
     </div>
   );
