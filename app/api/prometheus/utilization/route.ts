@@ -52,7 +52,7 @@ export async function GET(
   try {
     // Get instance name for the node
     const unameRes = (await prom.rangeQuery(
-      `node_uname_info{nodename=~"${node}"}`,
+      `node_uname_info{host=~"${node}"}`,
       start,
       end,
       STEP_INTERVAL

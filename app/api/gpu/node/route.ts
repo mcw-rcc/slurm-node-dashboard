@@ -33,7 +33,7 @@ export async function GET(req: Request) {
   }
 
   try {
-    const filter = buildGpuMetricsFilter([`Hostname="${escapePromString(node)}"`]);
+    const filter = buildGpuMetricsFilter([`host="${escapePromString(node)}"`]);
     const prometheusQuery = `avg_over_time(${promSelector("DCGM_FI_DEV_GPU_UTIL", filter)}[5m])`;
     const gpuRes = await prom.instantQuery(prometheusQuery);
 
