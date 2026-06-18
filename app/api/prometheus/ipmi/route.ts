@@ -84,9 +84,9 @@ export async function GET(req: Request) {
       // Prometheus metrics might store node identifiers in different label names
       const patterns = [
         // Try matching on hostname
-        `avg_over_time(ipmi_power_watts{name="Pwr Consumption", hostname=~"${clusterNodes.join(
+        `avg_over_time(ipmi_power_watts{name="Pwr Consumption", host=~"${clusterNodes.join(
           "|"
-        )}"}[15m]) or avg_over_time(ipmi_dcmi_power_consumption_watts{hostname=~"${clusterNodes.join(
+        )}"}[15m]) or avg_over_time(ipmi_dcmi_power_consumption_watts{host=~"${clusterNodes.join(
           "|"
         )}"}[15m])`,
 
@@ -162,7 +162,7 @@ export async function GET(req: Request) {
     // Collect nodes from results for cluster matching
     const nodesInResults = new Set<string>();
     historicalRes.result.forEach((series) => {
-      for (const label of ["hostname", "instance", "node"]) {
+      for (const label of ["host", "instance", "node"]) {
         const value = series.metric?.labels?.[label];
         if (value) nodesInResults.add(value);
       }
@@ -214,7 +214,7 @@ export async function GET(req: Request) {
 
       // Get node identifier
       let nodeId = null;
-      for (const label of ["hostname", "instance", "node"]) {
+      for (const label of ["host", "instance", "node"]) {
         if (series.metric?.labels?.[label]) {
           nodeId = series.metric.labels[label];
           break;
