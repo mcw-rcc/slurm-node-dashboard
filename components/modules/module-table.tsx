@@ -35,7 +35,7 @@ import {
 
 type Version = {
   versionName?: string;
-  help?: string;
+  description?: string;
 };
 
 type Module = {
@@ -67,9 +67,9 @@ export const ModuleTable = ({ results }: { results: Module[] }) => {
       const versionNameMatch =
         version.versionName?.toLowerCase().includes(searchTerm.toLowerCase()) ??
         false;
-      const helpMatch =
-        version.help?.toLowerCase().includes(searchTerm.toLowerCase()) ?? false;
-      return versionNameMatch || helpMatch;
+      const descriptionMatch =
+        version.description?.toLowerCase().includes(searchTerm.toLowerCase()) ?? false;
+      return versionNameMatch || descriptionMatch;
     });
     return packageMatch || versionMatch;
   });
@@ -241,7 +241,7 @@ export const ModuleTable = ({ results }: { results: Module[] }) => {
               <HoverCard key={index}>
                 <HoverCardTrigger asChild>
                   <TableRow>
-                    <TableCell className="font-medium uppercase">
+                    <TableCell className="font-medium">
                       {module.package || "N/A"}
                     </TableCell>
                     <TableCell>
@@ -258,7 +258,7 @@ export const ModuleTable = ({ results }: { results: Module[] }) => {
                       </div>
                     </TableCell>
                     <TableCell className="truncate max-w-[400px]">
-                      {versions[0]?.help || "No description available"}
+                      {versions[0]?.description || "No description available"}
                     </TableCell>
                   </TableRow>
                 </HoverCardTrigger>
@@ -268,7 +268,7 @@ export const ModuleTable = ({ results }: { results: Module[] }) => {
                       {module.package || "N/A"}
                     </div>
                     <div className="text-sm mb-2">
-                      {versions[0]?.help || "No description available"}
+                      {versions[0]?.description || "No description available"}
                     </div>
                     <div className="text-sm font-medium mt-2">
                       Available Versions:
