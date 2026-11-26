@@ -48,7 +48,7 @@ export async function getInstanceForNode(nodeName: string): Promise<string | nul
   }
 
   try {
-    const result = await prom.instantQuery(`node_uname_info{nodename="${nodeName}"}`);
+    const result = await prom.instantQuery(`node_uname_info{host="${nodeName}"}`);
     const instance = result?.result?.[0]?.metric?.labels?.instance;
 
     if (instance) {

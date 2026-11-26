@@ -28,7 +28,7 @@ export async function GET(req: Request) {
   try {
     const unameQuery = "node_uname_info";
     const unameRes: PrometheusQueryResponse = await prom.rangeQuery(
-      `${unameQuery}{nodename="${node}"}`,
+      `${unameQuery}{host="${node}"}`,
       start,
       end,
       step
@@ -50,7 +50,7 @@ export async function GET(req: Request) {
       // DCGM metrics have volatile labels (hpc_job, UUID, etc.) that change per job,
       // creating multiple time series over a range. Aggregate with max to merge them
       // into one series per GPU, so we don't pick up a stale/idle series.
-      prometheusQuery = `max by (Hostname, gpu) (${query}{Hostname="${node}"})`;
+      prometheusQuery = `max by (host, gpu) (${query}{node="${node}"})`;
     } else if (query === "node_hwmon_temp_celsius") {
       // Get CPU package temperature (sensor temp1 on coretemp)
       prometheusQuery = `${query}{instance="${instance}", chip=~".*coretemp.*", sensor="temp1"}`;
